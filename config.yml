@@ -1,0 +1,7 @@
+repo_url: https://mazzz1y.github.io/fdroid/repo
+repo_name: mazzz1y's F-Droid Repo
+repo_description: >-
+  Personal F-Droid repository.
+archive_older: 0
+keystore: keystore.p12
+repo_keyalias: fdroidrepo

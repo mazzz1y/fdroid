@@ -1,0 +1,4 @@
+apps:
+  - github: mazzz1y/peel
+    metadata_path: metadata
+    allowed_signer: 71192d55ab63848e9135a5bf49ae3859cf3f43125fd7c740c7e05f4615e60e05

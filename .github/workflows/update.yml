@@ -1,0 +1,68 @@
+name: Update F-Droid Repo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: build-tools;36.0.0
+
+      - name: Add build-tools to PATH
+        run: echo "${ANDROID_HOME}/build-tools/36.0.0" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore keystore and inject passwords
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > keystore.p12
+          printf "keystorepass: '%s'\n" "$KEYSTORE_PASS" >> config.yml
+          printf "keypass: '%s'\n" "$KEYSTORE_PASS" >> config.yml
+
+      - name: Process apps from registry
+        run: python3 scripts/process_apps.py
+
+      - name: Run fdroid update
+        run: fdroid update --create-metadata --rename-apks
+
+      - name: Prepare pages artifact
+        run: |
+          mkdir _site
+          cp -r repo _site/repo
+          echo '<meta http-equiv="refresh" content="0;url=repo">' > _site/index.html
+
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          overwrite: true
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
