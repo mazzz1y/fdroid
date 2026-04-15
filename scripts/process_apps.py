@@ -2,11 +2,13 @@
 import base64
 import glob
 import hashlib
+import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 
 import yaml
 
@@ -24,6 +26,36 @@ def apk_package_name(apk_path: str) -> str:
         check=True,
     )
     return result.stdout.strip()
+
+
+def apk_version_code(apk_path: str) -> int:
+    result = subprocess.run(
+        ["aapt2", "dump", "badging", apk_path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("package:"):
+            for token in line.split():
+                if token.startswith("versionCode="):
+                    return int(token.split("=", 1)[1].strip("'"))
+    raise ValueError(f"versionCode not found in {apk_path}")
+
+
+def apk_version_name(apk_path: str) -> str:
+    result = subprocess.run(
+        ["aapt2", "dump", "badging", apk_path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("package:"):
+            for token in line.split():
+                if token.startswith("versionName="):
+                    return token.split("=", 1)[1].strip("'")
+    raise ValueError(f"versionName not found in {apk_path}")
 
 
 def apk_signer_sha256(apk_path: str) -> str | None:
@@ -80,7 +112,7 @@ def download_release_apks(repo: str, dest: str) -> list[str]:
     return sorted(glob.glob(os.path.join(dest, "*.apk")))
 
 
-def get_latest_tag(repo: str) -> str | None:
+def get_release_info(repo: str) -> dict | None:
     result = subprocess.run(
         [
             "gh",
@@ -89,16 +121,14 @@ def get_latest_tag(repo: str) -> str | None:
             "--repo",
             repo,
             "--json",
-            "tagName",
-            "-q",
-            ".tagName",
+            "tagName,publishedAt",
         ],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         return None
-    return result.stdout.strip() or None
+    return json.loads(result.stdout)
 
 
 def fetch_metadata(repo: str, tag: str, metadata_path: str, dest: str) -> bool:
@@ -131,10 +161,45 @@ def fetch_metadata(repo: str, tag: str, metadata_path: str, dest: str) -> bool:
     return True
 
 
+def expand_changelogs(metadata_dir: str, version_codes: list[int]) -> None:
+    if not version_codes:
+        return
+    for locale_dir in glob.glob(os.path.join(metadata_dir, "*/changelogs")):
+        for code in version_codes:
+            dest = os.path.join(locale_dir, f"{code}.txt")
+            if os.path.exists(dest):
+                continue
+            base = os.path.join(locale_dir, f"{code // 10}.txt")
+            if os.path.isfile(base):
+                shutil.copy2(base, dest)
+
+
+def write_app_metadata(
+    package: str,
+    template: dict,
+    version_name: str,
+    version_codes: list[int],
+) -> None:
+    app = dict(template)
+    app["CurrentVersion"] = version_name
+    app["CurrentVersionCode"] = max(version_codes)
+    app["Builds"] = [
+        {"versionName": version_name, "versionCode": code}
+        for code in sorted(version_codes)
+    ]
+    dest = os.path.join(METADATA_DIR, f"{package}.yml")
+    with open(dest, "w") as f:
+        yaml.safe_dump(app, f, sort_keys=False, default_flow_style=False)
+    log.info("Wrote %s", dest)
+
+
 def process_app(app: dict) -> None:
     repo = app["github"]
     allowed_signer = app.get("allowed_signer")
     metadata_path = app.get("metadata_path")
+    metadata_template = app.get("metadata")
+    if not metadata_template:
+        raise SystemExit(f"Missing 'metadata' block for {repo} in apps.yml")
 
     log.info("Processing %s", repo)
 
@@ -150,23 +215,39 @@ def process_app(app: dict) -> None:
                 log.info("Verified %s", os.path.basename(apk))
 
         package = apk_package_name(apks[0])
+        version_codes = [apk_version_code(apk) for apk in apks]
+        version_name = apk_version_name(apks[0])
         log.info("Package: %s", package)
 
+        moved = []
         for apk in apks:
-            shutil.move(apk, os.path.join(REPO_DIR, os.path.basename(apk)))
+            dest = os.path.join(REPO_DIR, os.path.basename(apk))
+            shutil.move(apk, dest)
+            moved.append(dest)
 
-    if not metadata_path:
+    release = get_release_info(repo)
+    if not release:
+        log.warning("No release info for %s", repo)
         return
 
-    tag = get_latest_tag(repo)
-    if not tag:
-        log.warning("Skipping metadata for %s: no tag found", repo)
-        return
+    tag = release["tagName"]
+    published = release.get("publishedAt")
+    if published:
+        ts = datetime.fromisoformat(published).timestamp()
+        for apk in moved:
+            os.utime(apk, (ts, ts))
+
     log.info("Tag: %s", tag)
 
-    dest = os.path.join(METADATA_DIR, package)
-    if fetch_metadata(repo, tag, metadata_path, dest):
-        log.info("Metadata copied to %s", dest)
+    os.makedirs(METADATA_DIR, exist_ok=True)
+    write_app_metadata(package, metadata_template, version_name, version_codes)
+
+    if metadata_path:
+        dest = os.path.join(METADATA_DIR, package)
+        if fetch_metadata(repo, tag, metadata_path, dest):
+            if app.get("abi_suffix"):
+                expand_changelogs(dest, version_codes)
+            log.info("Metadata copied to %s", dest)
 
 
 def main() -> None:

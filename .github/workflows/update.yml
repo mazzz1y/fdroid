@@ -50,7 +50,7 @@ jobs:
         run: python3 scripts/process_apps.py
 
       - name: Run fdroid update
-        run: fdroid update --create-metadata --rename-apks
+        run: fdroid update --rename-apks --use-date-from-apk
 
       - name: Prepare pages artifact
         run: |
